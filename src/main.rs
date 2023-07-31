@@ -1,4 +1,5 @@
 use io_uring::Submitter;
+use io_uring::types::Timespec;
 use io_uring::{cqueue, squeue, opcode, types::Fd, IoUring, Probe};
 use nix::Error;
 
@@ -12,9 +13,8 @@ use libc::{self, iovec};
 
 use std::net::{Ipv4Addr};
 
-use ipnet::{IpSubnets, Ipv4Subnets};
+use ipnet::{IpSubnets, Ipv4Subnets, IpAddrRange, Ipv4AddrRange, Ipv4Net};
 
-// TODO: Is using static lifetime OK here?
 #[derive(Clone)]
 struct SubnetInfo {
     ip_start : String,
@@ -66,79 +66,113 @@ impl Ring {
 } 
 
 fn scan (
-    ring : IoUring,
+    mut ring : IoUring,
     ip_start : &str,
     ports : Vec<u16>,
-    subnet_len: u8
-) -> Result<i32, io::Error> {
+    subnet_len: u8,
+    mut chunk_size: usize,
+) -> Result<(), io::Error> {
 
-    let max_ip = "255.255.255.255";
-
-    // TODO: Loop here
-    let subnets: IpSubnets = IpSubnets::from(Ipv4Subnets::new(
-        ip_start.parse().unwrap(),
-        max_ip.parse().unwrap(),
-        subnet_len
-    ));
-
-    for ip in subnets {
-        println!("{}", ip.to_string());
-    }
-
-    // println!("Trying to connect to: {}", ip_port);
-
-    // TODO: Uncomment
     // Parse the ip and port
     // let mut ip_port_itr = ip_port.splitn(2, ":");
     // let ip = std::net::IpAddr::from_str(ip_port_itr.next().expect("")).expect("");
     // let port = ip_port_itr.next().expect("").parse::<u16>().unwrap();
     
-    // let ip_str = ip.to_string();
-    // let ip_itr : Vec<&str> = ip_str.splitn(4, ".").collect();
+    let ip_itr : Vec<&str> = ip_start.splitn(4, ".").collect();
+    let mut ip_bytes_start : [u8; 4] = [0; 4];
+    for i in 0..4 {
+        ip_bytes_start[i] = ip_itr[i].parse::<u8>().unwrap();
+    }
+    
+    let ip_range = Ipv4Net::new(
+        Ipv4Addr::from(ip_bytes_start), subnet_len
+    )
+    .expect("Ip range creation failed")
+    .hosts()
+    .collect::<Vec<Ipv4Addr>>();
 
-    // let mut ip_bytes : [u8; 4] = [0; 4];
-    // for i in 0..4 {
-    //     ip_bytes[i] = ip_itr[i].parse::<u8>().unwrap();
-    // }
+    // let mut chunk_size = 16;
+    let chunks = ip_range.chunks(chunk_size);
 
-    // TODO: Uncomment
-    // println!("Trying: {:?}", ip_bytes);
+    // TODO: Might change the nesting here
+    for ip_chunk in chunks {
+        for port in &ports {
+            // The last chunk generally has a shorter length, so we make an exception for it
+            if ip_chunk.len() != chunk_size {
+                chunk_size = ip_chunk.len();
+            }
 
-    // let addr = SockaddrIn::new(
-    //     ip_bytes[0],
-    //     ip_bytes[1],
-    //     ip_bytes[2],
-    //     ip_bytes[3],
-    //     port
-    // );
+            connect_batch(ip_chunk, port, &mut ring);
 
-    // Create a socket
-    let sckt = socket(
-        AddressFamily::Inet,
-        SockType::Stream,
-        SockFlag::SOCK_NONBLOCK, 
-        None,
-    ).expect("TCP socket creation failed");
+            let _ = ring.submit_and_wait(chunk_size)
+            .expect("Error submitting to submission queue");
 
-    // Set the socket to non-blocking mode
-    // TODO: Chek if as_raw_fd() method is needed or not
+            for i in 0..chunk_size {
+                let addr = ip_chunk[i];
+                let cqe = ring.completion().next().expect("Completion queue is empty");
+
+                if cqe.result() >= 0 {
+                    println!("Connection established to: {}", addr.to_string());
+                } else {
+                    println!("Connection failed to: {} , Error code: {}", addr.to_string(), cqe.result());
+                }
+            }
+
+            // connect(sckt, addr, &mut ring)
+            // .expect(format!("Connection failed to host {}", addr.to_string()).as_str());
+        }
+    }
+
     // nix::fcntl::fcntl(sckt, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK)).expect("Failed to set socket to non-blocking");
 
-    // TODO: Do this with a range of ips and ports
-    // connect(sckt, addr, ring).expect("Error when trying to connect");
+    Ok(())
+}
 
-    Ok(sckt)
+// TODO: Check if it enters every parameter correctly
+fn connect_batch (
+    chunk : &[Ipv4Addr],
+    port: &u16,
+    ring : &mut IoUring,
+) {
+    for ip in chunk {
+        let ip_bytes = ip.clone().octets();
+        let port_ = port.clone();
 
+        let addr = SockaddrIn::new(
+            ip_bytes[0],
+            ip_bytes[1],
+            ip_bytes[2],
+            ip_bytes[3],
+            port_,
+        );
+
+        // println!("addr in connect_batch: {:?}", addr);
+        // if ip_bytes[3] == 208 {
+        //     println!("port in connect_batch: {}", port);
+        // }
+
+        // println!("addr: {:?}", addr);
+        // TODO: Move the code so that the sockets (num of chunk size) are reusable for every chunk
+        let sckt = socket(
+            AddressFamily::Inet,
+            SockType::Stream,
+            SockFlag::SOCK_NONBLOCK,
+            None,
+        ).expect("TCP socket creation failed");
+
+        connect(sckt, addr, ring)
+        .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
+    }    
 }
 
 /*
 * TCP connect to a single port
 */
 fn connect (
-    sckt : i32, 
+    sckt : i32,
     addr : SockaddrIn,
-    mut ring : IoUring
-    ) -> Result<i32, Error> {
+    ring : &mut IoUring
+    ) -> Result<(), Error> {
 
     // Register opcode to establish connection
     let op_connect: squeue::Entry = opcode::Connect::new(
@@ -152,32 +186,23 @@ fn connect (
     // TODO: include timeout
     // let connect_timeout = Timespec::new().sec(5);
     // let op_connect_timeout = opcode::LinkTimeout::new(&connect_timeout).build();
-    // let ops = [op_connect, op_connect_timeout];
-    
+
     unsafe {
         ring.submission()
         .push(&op_connect)
         .expect("Failed to push connect to submission queue");
     }
-    let _ = ring.submit();
 
-    let cqe = ring.completion().next().expect("Completion queue is empty");
-
-    if cqe.result() >= 0 {
-        println!("Connection established!");
-    } else {
-        println!("Connection failed. Error code: {}", cqe.result());
-    }
-
-    Ok(cqe.result())
-
+    Ok(())
 }
 
+
+// TODO: Needs ring parameter
 fn send_tcp_packet (
     sckt : i32
 ) -> Result<i32, Error> {
-    const MSG : &str = "GET / HTTP/1.1\r\n Host:localhost";
-    // const MSG : &str = "GET /.bashrc HTTP/1.1";
+    // const MSG : &str = "GET / HTTP/1.1\r\n Host:localhost";
+    const MSG : &str = "Hello, server";
 
     // let mut tx_buffer : Vec<i32> = vec![0; 128];
     let mut tx_buffer: [u8; 128] = [0; 128];
@@ -241,14 +266,17 @@ fn read_response (
 }
 
 // Input format is "ip/range" like "192.168.1.0/24"
-fn parse_subnet (subnet_str : &str, ports_str : String) -> SubnetInfo
-{
+fn parse_subnet (
+    subnet_str : &str,
+    ports_str : String
+) -> SubnetInfo {
     let mut ip_itr = subnet_str.splitn(2, "/");
     let ip_start = ip_itr.next().unwrap();
     let subnet_len = ip_itr.next().unwrap().parse::<u8>().unwrap();
     let ports = ports_str.split(",")
     .map(|s| s.to_string()
-    .parse::<u16>().expect("Parse error"))
+    .parse::<u16>()
+    .expect("Parse error"))
     .collect();
 
     // Subnet specifier must be between 0 and 32
@@ -265,29 +293,89 @@ fn parse_subnet (subnet_str : &str, ports_str : String) -> SubnetInfo
     return subnet_info
 }
 
+fn test (ring :&mut IoUring) {
+    let ip_range = vec![
+        Ipv4Addr::new(127, 0, 0, 1),
+        Ipv4Addr::new(127, 0, 0, 2),
+        Ipv4Addr::new(127, 0, 0, 3),
+        Ipv4Addr::new(127, 0, 0, 4),
+        Ipv4Addr::new(127, 0, 0, 5),
+        Ipv4Addr::new(127, 0, 0, 6),
+        Ipv4Addr::new(127, 0, 0, 7),
+        Ipv4Addr::new(127, 0, 0, 8),
+    ];
+
+    let port = 9001;
+    let addr = SockaddrIn::new(
+        127,
+        0,
+        0,
+        1,
+        port.clone(),
+    );
+
+    let sckt = socket(
+        AddressFamily::Inet,
+        SockType::Stream,
+        SockFlag::SOCK_NONBLOCK,
+        None,
+    ).expect("TCP socket creation failed");
+
+
+    // let _ = connect_batch(ip_range.as_slice(), &9001, ring);
+    let _ = connect(sckt, addr, ring);
+
+    let chunk_size = 1;
+    let _ = ring.submit_and_wait(chunk_size)
+    .expect("Error submitting to submission queue");
+    
+    for i in 0..chunk_size {
+        let cqe = ring.completion().next().expect("Completion queue is empty");
+
+        if cqe.result() >= 0 {
+            println!("Connection established");
+        } else {
+            println!("Connection failed to: , Error code: {}", cqe.result());
+    }
+
+}
+    
+}
+
 fn main() {
     // Take arguments
     let args : Vec<String> = env::args().collect();
 
-    // let ring = Ring::new(io_uring).expect("Ring struct creation failed");
     
-    let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
-    let ports_str = args.get(2).expect("Argument error: Wrong ports format");
+    // let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
+    let subnet_str = "127.0.0.1/24";
+    // let ports_str = args.get(2).expect("Argument error: Wrong ports format");
+    let ports_str = "9001"; 
     
     let subnet_info = parse_subnet(subnet_str, ports_str.to_string());
     
-    println!("ip_start: {}\nports: {:?}\nsubnet_len: {}", 
-    subnet_info.ip_start,
-    subnet_info.ports,
-    subnet_info.subnet_len
-    );
+    // println!("ip_start: {}\nports: {:?}\nsubnet_len: {}", 
+    // subnet_info.ip_start,
+    // subnet_info.ports,
+    // subnet_info.subnet_len
+    // );
 
-    let ring = IoUring::new(8).expect("Ring creation failed");
+    let size = 8;
+    // TODO: Remove mut
+    let ring = IoUring::new(size).expect("Ring creation failed");
+
+    // test(&mut ring);
+
+    let ip_start = subnet_info.ip_start.clone();
+    let ports = subnet_info.ports.clone();
+    let subnet_len = subnet_info.subnet_len.clone();
+
     scan(
         ring,
-        &subnet_info.ip_start,
-        subnet_info.ports,
-        subnet_info.subnet_len,
+        &ip_start,
+        ports,
+        subnet_len,
+        size as usize
     ).expect("Error when creating TCP socket");
 
     // send_tcp_packet(ip_port);
