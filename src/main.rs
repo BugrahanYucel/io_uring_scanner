@@ -104,9 +104,6 @@ fn scan (
 
             connect_batch(ip_chunk, port, &mut ring);
 
-            let _ = ring.submit_and_wait(chunk_size)
-            .expect("Error submitting to submission queue");
-
             for i in 0..chunk_size {
                 let addr = ip_chunk[i];
                 let cqe = ring.completion().next().expect("Completion queue is empty");
@@ -147,9 +144,9 @@ fn connect_batch (
         );
 
         // println!("addr in connect_batch: {:?}", addr);
-        // if ip_bytes[3] == 208 {
-        //     println!("port in connect_batch: {}", port);
-        // }
+        if ip_bytes[3] == 208 {
+            println!("port in connect_batch: {}", port);
+        }
 
         // println!("addr: {:?}", addr);
         // TODO: Move the code so that the sockets (num of chunk size) are reusable for every chunk
@@ -163,6 +160,8 @@ fn connect_batch (
         connect(sckt, addr, ring)
         .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
     }    
+    let _ = ring.submit_and_wait(8)
+            .expect("Error submitting to submission queue");
 }
 
 /*
@@ -192,6 +191,9 @@ fn connect (
         .push(&op_connect)
         .expect("Failed to push connect to submission queue");
     }
+
+    // TODO: move the result checking here and test the results
+
 
     Ok(())
 }
