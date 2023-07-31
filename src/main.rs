@@ -15,54 +15,14 @@ use std::net::{Ipv4Addr};
 
 use ipnet::{IpSubnets, Ipv4Subnets, IpAddrRange, Ipv4AddrRange, Ipv4Net};
 
+// TODO: Parse arguments with flags using clap, looks good
+// use clap::{Arg, App};
+
 #[derive(Clone)]
 struct SubnetInfo {
     ip_start : String,
     ports : Vec<u16>,
     subnet_len : u8,
-}
-
-struct Ring {
-    entries : u32,
-    rx_size : u32,
-}
-
-impl Ring {
-    // pub fn new (ring : IoUring) -> Result<Self, Error> {
-        // let mut ring = IoUring::new(8).expect("Error when creating io_uring");
-        
-        // let sq: io_uring::SubmissionQueue = ring.submission();
-        // let cq: io_uring::CompletionQueue = ring.completion();
-
-        // Ok(Self {})
-    // }
-
-
-    // pub fn submit_sq (&mut self, entry : squeue::Entry) -> Result<(), Error> {
-    //     unsafe {
-    //         self.sq.push(&entry).expect("Submission queue is full");
-    //     }
-    //     Ok(())
-    // }
-
-    // pub fn submit_and_wait(&self, num : i32) {
-    //     // ring.submit_and_wait(1).expect("Completion queue is empty");
-        
-    // }
-
-    // pub fn return_cqe (&mut self, entry : squeue::Entry) -> Result<(), Error>{
-
-    //     let cqe = self.cq.next().expect("Completion queue is empty");
-    //     let connect_result = cqe.result();
-    //     if connect_result < 0 {
-    //         panic!("Completion queue failed to retrieve cqe")
-    //     }
-
-    //     let result = cqe.result();
-
-    //     Ok(())
-    // }
-
 } 
 
 fn scan (
@@ -94,7 +54,7 @@ fn scan (
     // let mut chunk_size = 16;
     let chunks = ip_range.chunks(chunk_size);
 
-    // TODO: Might change the nesting here
+    // TODO: Might change the nesting order here
     for ip_chunk in chunks {
         for port in &ports {
             // The last chunk generally has a shorter length, so we make an exception for it
@@ -104,16 +64,7 @@ fn scan (
 
             connect_batch(ip_chunk, port, &mut ring);
 
-            for i in 0..chunk_size {
-                let addr = ip_chunk[i];
-                let cqe = ring.completion().next().expect("Completion queue is empty");
 
-                if cqe.result() >= 0 {
-                    println!("Connection established to: {}", addr.to_string());
-                } else {
-                    println!("Connection failed to: {} , Error code: {}", addr.to_string(), cqe.result());
-                }
-            }
 
             // connect(sckt, addr, &mut ring)
             // .expect(format!("Connection failed to host {}", addr.to_string()).as_str());
@@ -144,11 +95,8 @@ fn connect_batch (
         );
 
         // println!("addr in connect_batch: {:?}", addr);
-        if ip_bytes[3] == 208 {
-            println!("port in connect_batch: {}", port);
-        }
-
         // println!("addr: {:?}", addr);
+
         // TODO: Move the code so that the sockets (num of chunk size) are reusable for every chunk
         let sckt = socket(
             AddressFamily::Inet,
@@ -160,8 +108,22 @@ fn connect_batch (
         connect(sckt, addr, ring)
         .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
     }    
-    let _ = ring.submit_and_wait(8)
-            .expect("Error submitting to submission queue");
+    
+    println!("{}", chunk.len());
+    ring.submit_and_wait(chunk.len())
+    .expect("Error submitting to submission queue");
+
+    for i in 0..chunk.len() {
+        let addr = chunk[i];
+        let cqe = ring.completion().next().expect("Completion queue is empty");
+        
+        if cqe.result() >= 0 {
+            println!("Connection established to: {} on port {}", addr.to_string(), port);
+        } else {
+            println!("Connection failed: {}:{} , Error code: {}", addr.to_string(), port, cqe.result());
+        }
+    }
+
 }
 
 /*
@@ -194,8 +156,12 @@ fn connect (
 
     // TODO: move the result checking here and test the results
 
-
     Ok(())
+}
+
+
+fn open_sockets () -> Result<Vec<SockaddrIn>, Error> {
+    return todo!()
 }
 
 
@@ -349,10 +315,8 @@ fn main() {
     let args : Vec<String> = env::args().collect();
 
     
-    // let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
-    let subnet_str = "127.0.0.1/24";
-    // let ports_str = args.get(2).expect("Argument error: Wrong ports format");
-    let ports_str = "9001"; 
+    let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
+    let ports_str = args.get(2).expect("Argument error: Wrong ports format");
     
     let subnet_info = parse_subnet(subnet_str, ports_str.to_string());
     
@@ -362,8 +326,7 @@ fn main() {
     // subnet_info.subnet_len
     // );
 
-    let size = 8;
-    // TODO: Remove mut
+    let size = 16; // TODO: Take from args
     let ring = IoUring::new(size).expect("Ring creation failed");
 
     // test(&mut ring);
@@ -383,7 +346,3 @@ fn main() {
     // send_tcp_packet(ip_port);
     
 }
-
-// TODO: Move ip parsing operations to another function
-// TODO: Store the ring anywhere else (Mandatory)
-// TODO: Move opcode creations into their own expressions
