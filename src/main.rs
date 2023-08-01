@@ -31,9 +31,11 @@ pub struct EntryInfo {
     pub fd: RawFd,
 }
 
+#[derive(Clone)]
 pub struct EntryManager {
     entries : Vec<EntryInfo>,
 }
+
 
 impl EntryManager {
     pub fn new() -> Self {
@@ -51,172 +53,195 @@ impl EntryManager {
     }
 }
 
+#[derive(Clone)]
 pub struct Scanner {
     entry_manager : EntryManager
 }
 
 impl Scanner {
-    
-}
+    pub fn new() -> Self {
+        let entry_manager = EntryManager {
+            entries: Vec::new(),
+        };
 
-fn scan (
-    mut ring : IoUring,
-    ip_start : &str,
-    ports : Vec<u16>,
-    subnet_len: u8,
-    mut chunk_size: usize,
-) -> Result<(), io::Error> {
-
-    let ip_itr : Vec<&str> = ip_start.splitn(4, ".").collect();
-    let mut ip_bytes_start : [u8; 4] = [0; 4];
-    for i in 0..4 {
-        ip_bytes_start[i] = ip_itr[i].parse::<u8>().unwrap();
-    }
-    
-    let ip_range = Ipv4Net::new(
-        Ipv4Addr::from(ip_bytes_start), subnet_len
-    )
-    .expect("Ip range creation failed")
-    .hosts()
-    .collect::<Vec<Ipv4Addr>>();
-
-    let chunks = ip_range.chunks(chunk_size);
-
-    // TODO: Might change the nesting order here
-    for ip_chunk in chunks {
-        for port in &ports {
-            // The last chunk generally has a shorter length, so we make an exception for it
-            if ip_chunk.len() != chunk_size {
-                chunk_size = ip_chunk.len();
-            }
-
-            connect_batch(ip_chunk, port, &mut ring);
-
-            // connect(sckt, addr, &mut ring)
-            // .expect(format!("Connection failed to host {}", addr.to_string()).as_str());
+        // Return the Scanner instance
+        Scanner {
+            entry_manager,
         }
     }
+    
+    pub fn scan (
+        &mut self,
+        mut ring : IoUring,
+        ip_start : &str,
+        ports : Vec<u16>,
+        subnet_len: u8,
+        mut chunk_size: usize,
+    ) -> Result<(), io::Error> {
+    
+        let ip_itr : Vec<&str> = ip_start.splitn(4, ".").collect();
+        let mut ip_bytes_start : [u8; 4] = [0; 4];
+        for i in 0..4 {
+            ip_bytes_start[i] = ip_itr[i].parse::<u8>().unwrap();
+        }
+        
+        let ip_range = Ipv4Net::new(
+            Ipv4Addr::from(ip_bytes_start), subnet_len
+        )
+        .expect("Ip range creation failed")
+        .hosts()
+        .collect::<Vec<Ipv4Addr>>();
+    
+        let chunks = ip_range.chunks(chunk_size);
+    
+        // TODO: Might change the nesting order here
+        for ip_chunk in chunks {
+            for port in &ports {
+                // The last chunk generally has a shorter length, so we make an exception for it
+                if ip_chunk.len() != chunk_size {
+                    chunk_size = ip_chunk.len();
+                }
+    
+                self.connect_batch(ip_chunk, port, &mut ring);
+    
+                // connect(sckt, addr, &mut ring)
+                // .expect(format!("Connection failed to host {}", addr.to_string()).as_str());
+            }
+        }
+    
+        // nix::fcntl::fcntl(sckt, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK)).expect("Failed to set socket to non-blocking");
+    
+        Ok(())
+    }
 
-    // nix::fcntl::fcntl(sckt, nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK)).expect("Failed to set socket to non-blocking");
+        // TODO: Check if it enters every parameter correctly
+    fn connect_batch (
+        &mut self,
+        chunk : &[Ipv4Addr],
+        port: &u16,
+        ring : &mut IoUring,
+    ) {
+        for ip in chunk {
+            let ip_bytes = ip.clone().octets();
+            let port_ = port.clone();
 
-    Ok(())
-}
+            let addr = SockaddrIn::new(
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
+                port_,
+            );
 
-// TODO: Check if it enters every parameter correctly
-fn connect_batch (
-    chunk : &[Ipv4Addr],
-    port: &u16,
-    ring : &mut IoUring,
-) {
-    for ip in chunk {
-        let ip_bytes = ip.clone().octets();
-        let port_ = port.clone();
+            // TODO: Move the code so that the sockets (num of chunk size) are reusable for every chunk
+            let sckt = socket(
+                AddressFamily::Inet,
+                SockType::Stream,
+                SockFlag::SOCK_NONBLOCK,
+                None,
+            ).expect("TCP socket creation failed");
 
-        let addr = SockaddrIn::new(
-            ip_bytes[0],
-            ip_bytes[1],
-            ip_bytes[2],
-            ip_bytes[3],
-            port_,
+            self.connect(sckt, &addr, ring)
+            .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
+        }    
+        
+        ring.submit_and_wait(chunk.len() * 3)
+        .expect("Error submitting to submission queue");
+
+        // TODO: A bug is present because of pushing connect, timeout and close operations at the 
+        // same time and then not discarding the corresponding timeout and close oeprations.
+        // What I must do is create a struct like an allocator, push the connect operations with 
+        // this user_data and only count the connect operations. This way CQs are mapped to SQs
+        // accurately and we will have correct output
+        for i in 0..chunk.len() {
+            let addr = chunk[i];
+            let cqe = ring.completion().next().expect("Completion queue is empty");
+            
+            if cqe.result() >= 0 {
+                println!("Connection established to: {} on port {}", addr.to_string(), port);
+            } else {
+                println!("Connection failed: {}:{} , Error code: {}", addr.to_string(), port, cqe.result());
+            }
+        }
+
+    }
+
+    /*
+    * TCP connect to a single port
+    */
+    fn connect (
+        &mut self,
+        sckt : i32,
+        addr : &SockaddrIn,
+        ring : &mut IoUring,
+        ) -> Result<(), Error> {
+
+        // TODO: Create indices to identify operations in CQ
+
+        let addr = Rc::new(addr.to_owned());
+
+        let op_connect_index = self.entry_manager.add_entry(
+            Rc::new(*addr),
+            0,
+            sckt.as_raw_fd(),
         );
 
-        // TODO: Move the code so that the sockets (num of chunk size) are reusable for every chunk
-        let sckt = socket(
-            AddressFamily::Inet,
-            SockType::Stream,
-            SockFlag::SOCK_NONBLOCK,
-            None,
-        ).expect("TCP socket creation failed");
+        let op_timeout_index = self.entry_manager.add_entry(
+            Rc::new(*addr),
+            1,
+            sckt.as_raw_fd()
+        );
 
-        connect(sckt, &addr, ring)
-        .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
-    }    
-    
-    ring.submit_and_wait(chunk.len() * 3)
-    .expect("Error submitting to submission queue");
+        let op_close_index = self.entry_manager.add_entry(
+            Rc::new(*addr),
+            2,
+            sckt.as_raw_fd(),
+        );
+        // Build the Connect opcode to establish connection
+        let op_connect: squeue::Entry = opcode::Connect::new(
+            Fd(sckt.as_raw_fd()),
+            addr.as_ptr(),
+            addr.len()
+        )
+        .build()
+        .flags(squeue::Flags::IO_LINK)
+        .user_data(op_connect_index as u64);
 
-    // TODO: A bug is present because of pushing connect, timeout and close operations at the 
-    // same time and then not discarding the corresponding timeout and close oeprations.
-    // What I must do is create a struct like an allocator, push the connect operations with 
-    // this user_data and only count the connect operations. This way CQs are mapped to SQs
-    // accurately and we will have correct output
-    for i in 0..chunk.len() {
-        let addr = chunk[i];
-        let cqe = ring.completion().next().expect("Completion queue is empty");
-        
-        if cqe.result() >= 0 {
-            println!("Connection established to: {} on port {}", addr.to_string(), port);
-        } else {
-            println!("Connection failed: {}:{} , Error code: {}", addr.to_string(), port, cqe.result());
+        // Build the LinkTimeout opcode to add timeout feature
+        let timespec = Timespec::new().sec(8); // TODO: Parameterize
+        let l_timeout: squeue::Entry = opcode::LinkTimeout::new(
+            &timespec
+        )
+        .build()
+        .flags(squeue::Flags::IO_LINK)
+        .user_data(op_timeout_index as u64);
+
+        let op_close = opcode::Close::new(Fd(sckt.as_raw_fd()))
+        .build()
+        .user_data(op_close_index as u64);
+
+        let ops = [op_connect, l_timeout, op_close];
+
+        unsafe {
+            ring.submission()
+            .push_multiple(&ops)
+            .expect("Failed to push operations, submission queue is full");
+
+            // ring.submission()
+            // .push(&op_connect)
+            // .expect("Failed to push Connect to submission queue, queue is full");
+
+            // ring.submission()
+            // .push(&l_timeout)
+            // .expect("Failed to push LinkTimeout to submission queue, queue is full");
+
+            // ring.submission()
+            // .push(&op_close)
+            // .expect("Failed to push Close to submission queue, queue is full");
         }
+
+        Ok(())
     }
-
-}
-
-/*
-* TCP connect to a single port
-*/
-fn connect (
-    sckt : i32,
-    addr : &SockaddrIn,
-    ring : &mut IoUring,
-    ) -> Result<(), Error> {
-
-    // TODO: Create indices to identify operations in CQ
-
-    let addr = Rc::new(addr.to_owned());
-
-    // let op_connect_index = entry_manager.add_entry(
-    //     Rc::new(*addr),
-    //     0,
-    //     sckt.as_raw_fd(),
-    // );
-    // Build the Connect opcode to establish connection
-    let op_connect: squeue::Entry = opcode::Connect::new(
-        Fd(sckt.as_raw_fd()),
-        addr.as_ptr(),
-        addr.len()
-    )
-    .build()
-    .flags(squeue::Flags::IO_LINK);
-    // .user_data(op_connect_index as u64);
-
-    // TODO: include timeout
-    // let connect_timeout = Timespec::new().sec(5);
-    // let op_connect_timeout = opcode::LinkTimeout::new(&connect_timeout).build();
-
-    // Build the LinkTimeout opcode to add timeout feature
-    let timespec = Timespec::new().sec(8); // TODO: Parameterize
-    let l_timeout: squeue::Entry = opcode::LinkTimeout::new(
-        &timespec
-    )
-    .build()
-    .flags(squeue::Flags::IO_LINK);
-
-    let op_close = opcode::Close::new(Fd(sckt.as_raw_fd()))
-    .build();
-
-    let ops = [op_connect, l_timeout, op_close];
-
-    unsafe {
-        ring.submission()
-        .push_multiple(&ops)
-        .expect("Failed to push operations, submission queue is full");
-
-        // ring.submission()
-        // .push(&op_connect)
-        // .expect("Failed to push Connect to submission queue, queue is full");
-
-        // ring.submission()
-        // .push(&l_timeout)
-        // .expect("Failed to push LinkTimeout to submission queue, queue is full");
-
-        // ring.submission()
-        // .push(&op_close)
-        // .expect("Failed to push Close to submission queue, queue is full");
-    }
-
-    Ok(())
 }
 
 // TODO: 1- Open sockets and store them (OK)
@@ -369,7 +394,7 @@ fn main() {
     
     let subnet_info = parse_subnet(subnet_str, ports_str.to_string());
     
-    let entry_manager = EntryManager::new();
+    // let entry_manager = EntryManager::new();
 
 
     let size = 4; // TODO: Take from args
@@ -381,7 +406,9 @@ fn main() {
     let ports = subnet_info.ports.clone();
     let subnet_len = subnet_info.subnet_len.clone();
 
-    scan(
+    let mut scanner = Scanner::new();
+
+    scanner.scan(
         ring,
         &ip_start,
         ports,
