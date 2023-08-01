@@ -153,15 +153,31 @@ impl Scanner {
         // What I must do is create a struct like an allocator, push the connect operations with 
         // this user_data and only count the connect operations. This way CQs are mapped to SQs
         // accurately and we will have correct output
-        for i in 0..chunk.len() {
-            let addr = chunk[i];
+        for _ in 0..chunk.len() {
+            // let addr = chunk[i];
             let cqe = ring.completion().next().expect("Completion queue is empty");
-            
-            if cqe.result() >= 0 {
-                println!("Connection established to: {} on port {}", addr.to_string(), port);
+
+            // Retrieve the entry index of the completion
+            let index = cqe.user_data();
+            let entry_info = self.entry_manager.get_entry(index as usize)
+            .expect("Error when retrieving entry from vector");
+
+
+            // TODO: Move inside only Connect opcode checker
+            // TODO: Might move this checking section to another function
+
+            // If it is defined as a Connect opcode
+            if entry_info.op_type == 0 {
+                if cqe.result() >= 0 {
+                    println!("Connection established to: {} on port {}", entry_info.ip, port);
+                } else {
+                    println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                }
             } else {
-                println!("Connection failed: {}:{} , Error code: {}", addr.to_string(), port, cqe.result());
+                // println!("Discarded opcode");
             }
+            // Can handle other opcodes here
+
         }
 
     }
