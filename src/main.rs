@@ -99,7 +99,7 @@ impl Scanner {
                 if ip_chunk.len() != chunk_size {
                     chunk_size = ip_chunk.len();
                 }
-    
+
                 self.connect_batch(ip_chunk, port, &mut ring);
     
                 // connect(sckt, addr, &mut ring)
@@ -156,6 +156,7 @@ impl Scanner {
 
             // Retrieve the entry index of the completion
             let index = cqe.user_data();
+
             let entry_info = self.entry_manager.get_entry(index as usize)
             .expect("Error when retrieving entry from vector");
 
@@ -165,9 +166,11 @@ impl Scanner {
             // If it is defined as a Connect opcode
             if entry_info.op_type == 0 {
                 if cqe.result() >= 0 {
+                    println!("{}", index); // TODO: Remove
+
                     println!("Connection established to: {}", entry_info.ip);
                 } else {
-                    println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                    // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
                 }
             // } else if entry_info.op_type == 1 {
                 // println!("Timeout reached for: {}", entry_info.ip);
@@ -220,7 +223,7 @@ impl Scanner {
         .user_data(op_connect_index as u64);
 
         // Build the LinkTimeout opcode to add timeout feature
-        let timespec = Timespec::new().sec(8); // TODO: Parameterize
+        let timespec = Timespec::new().sec(5); // TODO: Parameterize
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -242,11 +245,9 @@ impl Scanner {
             // ring.submission()
             // .push(&op_connect)
             // .expect("Failed to push Connect to submission queue, queue is full");
-
             // ring.submission()
             // .push(&op_timeout)
             // .expect("Failed to push LinkTimeout to submission queue, queue is full");
-
             // ring.submission()
             // .push(&op_close)
             // .expect("Failed to push Close to submission queue, queue is full");
@@ -285,6 +286,8 @@ fn open_sockets (chunk_size : usize) -> Result<Vec<i32>, Error> {
 fn send_tcp_packet (
     sckt : i32
 ) -> Result<i32, Error> {
+
+    todo!();
     // const MSG : &str = "GET / HTTP/1.1\r\n Host:localhost";
     const MSG : &str = "Hello, server";
 
@@ -331,6 +334,7 @@ fn read_response (
     sckt: i32,
     buffer: &mut [u8],
 ) {
+    todo!();
     // let mut rx_buffer: Vec<u8> = vec![0; 1024];
 
     // let rcv_buffer = iovec {
@@ -348,6 +352,7 @@ fn read_response (
         ring.submission().push(&read_e).expect("Submission queue is full");
     };
 }
+
 
 // Input format is "ip/range" like "192.168.1.0/24"
 fn parse_subnet (
@@ -377,6 +382,7 @@ fn parse_subnet (
     return subnet_info
 }
 
+
 // Check if the used opcodes are supported for the current kernel
 fn check_supported () {
     let mut probe = Probe::new();
@@ -395,19 +401,8 @@ fn check_supported () {
     }
 }
 
-// fn get_uid() -> Result<u32, Error> {
-//     let uid : u32;
-//     unsafe {
-//         uid = libc::getuid();
-//         // println!("uid: {}", uid);
-//     }
-
-//     Ok(uid)
-// }
-
 
 fn main() {
-
     // TODO: Remove
     // use sudo;
 
@@ -433,7 +428,7 @@ fn main() {
 
     let size = 32; // TODO: Take from args
     // TODO: Change "* 4" to "* 3"
-    let ring = IoUring::new(size * 4).expect("Ring creation failed");
+    let ring = IoUring::new(size * 3).expect("Ring creation failed");
 
     let mut scanner = Scanner::new();
 
@@ -444,6 +439,14 @@ fn main() {
         subnet_len,
         size as usize,
     ).expect("Error scanning");
+
+    // TODO: For testing
+    // for i in 0..scanner.entry_manager.entries.len() {
+    //     let entry = &scanner.entry_manager.entries[i];
+    //     println!("{}: {}, {}, {}", i, entry.ip, entry.fd, entry.op_type);
+
+    //     if i > 100 {break;}
+    // }
 
     // send_tcp_packet(ip_port);
     
