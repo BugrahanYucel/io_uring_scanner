@@ -1,10 +1,10 @@
-use std::io::{self};
+use std::io::{self, Error};
 use std::os::fd::{AsRawFd, RawFd};
 use std::env;
 use std::rc::Rc;
 
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType, SockaddrLike, SockaddrIn};
-use nix::Error;
+// use nix::Error;
 use libc::{self, iovec};
 
 use io_uring::{squeue, opcode, types::Fd, IoUring, types::Timespec};
@@ -27,7 +27,6 @@ struct SubnetInfo {
 pub struct EntryInfo {
     pub ip: Rc<SockaddrIn>,
     pub op_type: u8,
-    // pub buf: Option<BufferInfo>,
     pub fd: RawFd,
 }
 
@@ -35,7 +34,6 @@ pub struct EntryInfo {
 pub struct EntryManager {
     entries : Vec<EntryInfo>,
 }
-
 
 impl EntryManager {
     pub fn new() -> Self {
@@ -45,7 +43,7 @@ impl EntryManager {
     pub fn add_entry(&mut self, ip: Rc<SockaddrIn>, op_type: u8, fd: RawFd) -> usize {
         let entry = EntryInfo { ip, op_type, fd };
         self.entries.push(entry);
-        self.entries.len() - 1 // Return the index of the newly added entry
+        self.entries.len() - 1// Return the index of the newly added entry
     }
 
     pub fn get_entry(&self, index: usize) -> Option<&EntryInfo> {
@@ -114,7 +112,6 @@ impl Scanner {
         Ok(())
     }
 
-        // TODO: Check if it enters every parameter correctly
     fn connect_batch (
         &mut self,
         chunk : &[Ipv4Addr],
@@ -145,41 +142,40 @@ impl Scanner {
             .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
         }    
         
+
         ring.submit_and_wait(chunk.len() * 3)
         .expect("Error submitting to submission queue");
 
-        // TODO: A bug is present because of pushing connect, timeout and close operations at the 
-        // same time and then not discarding the corresponding timeout and close oeprations.
-        // What I must do is create a struct like an allocator, push the connect operations with 
-        // this user_data and only count the connect operations. This way CQs are mapped to SQs
-        // accurately and we will have correct output
-        for _ in 0..chunk.len() {
+        // let completion = ring.completion().collect::<Vec<io_uring::cqueue::Entry>>();
+
+        // Get CQE results
+        for _ in 0..(chunk.len() * 3) {
             // let addr = chunk[i];
-            let cqe = ring.completion().next().expect("Completion queue is empty");
+
+            let cqe: io_uring::cqueue::Entry = ring.completion().next().expect("Completion queue is empty");
 
             // Retrieve the entry index of the completion
             let index = cqe.user_data();
             let entry_info = self.entry_manager.get_entry(index as usize)
             .expect("Error when retrieving entry from vector");
 
-
-            // TODO: Move inside only Connect opcode checker
             // TODO: Might move this checking section to another function
 
+            // println!("{:?}", chunk);
             // If it is defined as a Connect opcode
             if entry_info.op_type == 0 {
                 if cqe.result() >= 0 {
-                    println!("Connection established to: {} on port {}", entry_info.ip, port);
+                    println!("Connection established to: {}", entry_info.ip);
                 } else {
                     println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
                 }
+            // } else if entry_info.op_type == 1 {
+                // println!("Timeout reached for: {}", entry_info.ip);
             } else {
-                // println!("Discarded opcode");
+                // println!("Connection to: {} resulted with code: {}", entry_info.ip, cqe.result());
             }
             // Can handle other opcodes here
-
         }
-
     }
 
     /*
@@ -191,8 +187,6 @@ impl Scanner {
         addr : &SockaddrIn,
         ring : &mut IoUring,
         ) -> Result<(), Error> {
-
-        // TODO: Create indices to identify operations in CQ
 
         let addr = Rc::new(addr.to_owned());
 
@@ -213,6 +207,8 @@ impl Scanner {
             2,
             sckt.as_raw_fd(),
         );
+
+
         // Build the Connect opcode to establish connection
         let op_connect: squeue::Entry = opcode::Connect::new(
             Fd(sckt.as_raw_fd()),
@@ -225,7 +221,7 @@ impl Scanner {
 
         // Build the LinkTimeout opcode to add timeout feature
         let timespec = Timespec::new().sec(8); // TODO: Parameterize
-        let l_timeout: squeue::Entry = opcode::LinkTimeout::new(
+        let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
         .build()
@@ -236,7 +232,7 @@ impl Scanner {
         .build()
         .user_data(op_close_index as u64);
 
-        let ops = [op_connect, l_timeout, op_close];
+        let ops = [op_connect, op_timeout, op_close];
 
         unsafe {
             ring.submission()
@@ -248,7 +244,7 @@ impl Scanner {
             // .expect("Failed to push Connect to submission queue, queue is full");
 
             // ring.submission()
-            // .push(&l_timeout)
+            // .push(&op_timeout)
             // .expect("Failed to push LinkTimeout to submission queue, queue is full");
 
             // ring.submission()
@@ -257,6 +253,11 @@ impl Scanner {
         }
 
         Ok(())
+    }
+
+    // A function to make the outputs prettier
+    fn parse_result (result : &str) {
+        todo!()
     }
 }
 
@@ -376,11 +377,6 @@ fn parse_subnet (
     return subnet_info
 }
 
-// A function to make the outputs prettier
-fn parse_result (result : &str) {
-    todo!()
-}
-
 // Check if the used opcodes are supported for the current kernel
 fn check_supported () {
     let mut probe = Probe::new();
@@ -399,28 +395,45 @@ fn check_supported () {
     }
 }
 
+// fn get_uid() -> Result<u32, Error> {
+//     let uid : u32;
+//     unsafe {
+//         uid = libc::getuid();
+//         // println!("uid: {}", uid);
+//     }
+
+//     Ok(uid)
+// }
+
+
 fn main() {
+
+    // TODO: Remove
+    // use sudo;
+
     // Take arguments
     let args : Vec<String> = env::args().collect();
 
-    check_supported();
+    check_supported(); // Check if the kernel supports io_uring operations used in the program
 
+    // let running_as = sudo::check();
+    // println!("{:?}", running_as);
+    // sudo::escalate_if_needed().expect("Error when escalating privileges");
+
+    // Get parameters
     let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
     let ports_str = args.get(2).expect("Argument error: Wrong ports format");
     
     let subnet_info = parse_subnet(subnet_str, ports_str.to_string());
     
-    // let entry_manager = EntryManager::new();
-
-
-    let size = 4; // TODO: Take from args
-    let ring = IoUring::new(size * 3).expect("Ring creation failed");
-
-    // test(&mut ring);
-
+    
     let ip_start = subnet_info.ip_start.clone();
     let ports = subnet_info.ports.clone();
     let subnet_len = subnet_info.subnet_len.clone();
+
+    let size = 32; // TODO: Take from args
+    // TODO: Change "* 4" to "* 3"
+    let ring = IoUring::new(size * 4).expect("Ring creation failed");
 
     let mut scanner = Scanner::new();
 
@@ -435,3 +448,6 @@ fn main() {
     // send_tcp_packet(ip_port);
     
 }
+
+
+// TODO: Add a full port scan 0-65535
