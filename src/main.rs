@@ -43,7 +43,7 @@ impl EntryManager {
     pub fn add_entry(&mut self, ip: Rc<SockaddrIn>, op_type: u8, fd: RawFd) -> usize {
         let entry = EntryInfo { ip, op_type, fd };
         self.entries.push(entry);
-        self.entries.len() - 1// Return the index of the newly added entry
+        self.entries.len() - 1 // Return the index of the newly added entry
     }
 
     pub fn get_entry(&self, index: usize) -> Option<&EntryInfo> {
@@ -83,12 +83,14 @@ impl Scanner {
             ip_bytes_start[i] = ip_itr[i].parse::<u8>().unwrap();
         }
         
-        let ip_range = Ipv4Net::new(
+        let mut ip_range = Ipv4Net::new(
             Ipv4Addr::from(ip_bytes_start), subnet_len
         )
         .expect("Ip range creation failed")
         .hosts()
         .collect::<Vec<Ipv4Addr>>();
+    
+        // ip_range.reverse();
     
         let chunks = ip_range.chunks(chunk_size);
     
@@ -118,7 +120,8 @@ impl Scanner {
         port: &u16,
         ring : &mut IoUring,
     ) {
-        for ip in chunk {
+
+        for ip in chunk{
             let ip_bytes = ip.clone().octets();
             let port_ = port.clone();
 
@@ -141,7 +144,6 @@ impl Scanner {
             self.connect(sckt, &addr, ring)
             .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
         }    
-        
 
         ring.submit_and_wait(chunk.len() * 3)
         .expect("Error submitting to submission queue");
@@ -149,15 +151,13 @@ impl Scanner {
         // let completion = ring.completion().collect::<Vec<io_uring::cqueue::Entry>>();
 
         // Get CQE results
-        for _ in 0..(chunk.len() * 3) {
-            // let addr = chunk[i];
-
+        for _ in 0..chunk.len() * 3 {
             let cqe: io_uring::cqueue::Entry = ring.completion().next().expect("Completion queue is empty");
 
             // Retrieve the entry index of the completion
             let index = cqe.user_data();
 
-            let entry_info = self.entry_manager.get_entry(index as usize)
+            let entry_info = self.entry_manager.get_entry(index as _)
             .expect("Error when retrieving entry from vector");
 
             // TODO: Might move this checking section to another function
@@ -426,8 +426,7 @@ fn main() {
     let ports = subnet_info.ports.clone();
     let subnet_len = subnet_info.subnet_len.clone();
 
-    let size = 32; // TODO: Take from args
-    // TODO: Change "* 4" to "* 3"
+    let size = 128; // TODO: Take from args
     let ring = IoUring::new(size * 3).expect("Ring creation failed");
 
     let mut scanner = Scanner::new();
@@ -439,6 +438,7 @@ fn main() {
         subnet_len,
         size as usize,
     ).expect("Error scanning");
+
 
     // TODO: For testing
     // for i in 0..scanner.entry_manager.entries.len() {
