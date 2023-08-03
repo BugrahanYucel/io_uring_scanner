@@ -13,13 +13,17 @@ use io_uring::Probe;
 use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 
+use std::fs::File;
+use std::io::{BufRead};
+use std::str::FromStr;
+
 // TODO: Parse arguments with flags using clap, looks good
 // use clap::{Arg, App};
 
 #[derive(Clone)]
 struct SubnetInfo {
     ip_start : String,
-    ports : Vec<u16>,
+    // ports : Vec<u16>,
     subnet_len : u8,
 }
 
@@ -51,26 +55,44 @@ impl EntryManager {
     }
 }
 
-#[derive(Clone)]
 pub struct Scanner {
-    entry_manager : EntryManager
+    entry_manager : EntryManager,
+    ring : IoUring,
+    // sockets: Vec<i32>
 }
 
 impl Scanner {
-    pub fn new() -> Self {
+    pub fn new(entries : u32) -> Self {
         let entry_manager = EntryManager {
             entries: Vec::new(),
         };
 
+        let ring = IoUring::new(entries)
+        .expect("Error when creating IoUring instance");
+
+        // let mut sockets = Vec::new();
+        // for _ in 0..entries {
+        //     let sckt = socket(
+        //         AddressFamily::Inet,
+        //         SockType::Stream,
+        //         SockFlag::SOCK_NONBLOCK,
+        //         None,
+        //     ).expect("TCP socket creation failed");
+
+        //     sockets.push(sckt);
+        // }
+
         // Return the Scanner instance
         Scanner {
             entry_manager,
+            ring,
+            // sockets
         }
     }
     
     pub fn scan (
         &mut self,
-        mut ring : IoUring,
+        // mut ring : IoUring,
         ip_start : &str,
         ports : Vec<u16>,
         subnet_len: u8,
@@ -83,8 +105,9 @@ impl Scanner {
             ip_bytes_start[i] = ip_itr[i].parse::<u8>().unwrap();
         }
         
-        let mut ip_range = Ipv4Net::new(
-            Ipv4Addr::from(ip_bytes_start), subnet_len
+        let ip_range = Ipv4Net::new(
+            Ipv4Addr::from(ip_bytes_start), 
+            subnet_len
         )
         .expect("Ip range creation failed")
         .hosts()
@@ -102,7 +125,7 @@ impl Scanner {
                     chunk_size = ip_chunk.len();
                 }
 
-                self.connect_batch(ip_chunk, port, &mut ring);
+                self.connect_batch(ip_chunk, port);
     
                 // connect(sckt, addr, &mut ring)
                 // .expect(format!("Connection failed to host {}", addr.to_string()).as_str());
@@ -118,8 +141,9 @@ impl Scanner {
         &mut self,
         chunk : &[Ipv4Addr],
         port: &u16,
-        ring : &mut IoUring,
+        // ring : &mut IoUring,
     ) {
+        // let mut sckt_idx = 0;
 
         for ip in chunk{
             let ip_bytes = ip.clone().octets();
@@ -133,26 +157,30 @@ impl Scanner {
                 port_,
             );
 
-            // TODO: Move the code so that the sockets (num of chunk size) are reusable for every chunk
-            let sckt = socket(
-                AddressFamily::Inet,
-                SockType::Stream,
-                SockFlag::SOCK_NONBLOCK,
-                None,
-            ).expect("TCP socket creation failed");
+            // FIXME: Move the code so that the sockets (num of chunk size) are reusable for every chunk
+            // let sckt = socket(
+            //     AddressFamily::Inet,
+            //     SockType::Stream,
+            //     SockFlag::SOCK_NONBLOCK,
+            //     None,
+            // ).expect("TCP socket creation failed");
 
-            self.connect(sckt, &addr, ring)
+            // let sckt = *self.sockets.get(sckt_idx).expect("");
+            // sckt_idx += 1;
+            // println!("Socket: {}, Socket index: {}", sckt, sckt_idx);
+
+            self.connect(&addr)
             .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
         }    
 
-        ring.submit_and_wait(chunk.len() * 3)
+        self.ring.submit_and_wait(chunk.len() * 3)
         .expect("Error submitting to submission queue");
 
         // let completion = ring.completion().collect::<Vec<io_uring::cqueue::Entry>>();
 
         // Get CQE results
         for _ in 0..chunk.len() * 3 {
-            let cqe: io_uring::cqueue::Entry = ring.completion().next().expect("Completion queue is empty");
+            let cqe: io_uring::cqueue::Entry = self.ring.completion().next().expect("Completion queue is empty");
 
             // Retrieve the entry index of the completion
             let index = cqe.user_data();
@@ -164,20 +192,21 @@ impl Scanner {
 
             // println!("{:?}", chunk);
             // If it is defined as a Connect opcode
-            if entry_info.op_type == 0 {
-                if cqe.result() >= 0 {
-                    println!("{}", index); // TODO: Remove
-
-                    println!("Connection established to: {}", entry_info.ip);
-                } else {
-                    // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+            match entry_info.op_type {
+                0 => {
+                    // Connect opcode completion
+                    if cqe.result() >= 0 {
+                        println!("Connection established to: {}", entry_info.ip);
+                    } else {
+                        println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                    }
                 }
-            // } else if entry_info.op_type == 1 {
-                // println!("Timeout reached for: {}", entry_info.ip);
-            } else {
-                // println!("Connection to: {} resulted with code: {}", entry_info.ip, cqe.result());
-            }
-            // Can handle other opcodes here
+                // Can handle other op types here
+                _ => {
+                    // println!("Connection to: {} resulted with code: {}, op: {}", entry_info.ip, cqe.result(), entry_info.op_type);
+                }
+    
+            } 
         }
     }
 
@@ -186,10 +215,17 @@ impl Scanner {
     */
     fn connect (
         &mut self,
-        sckt : i32,
+        // sckt : i32,
         addr : &SockaddrIn,
-        ring : &mut IoUring,
+        // ring : &mut IoUring,
         ) -> Result<(), Error> {
+
+        let sckt = socket(
+            AddressFamily::Inet,
+            SockType::Stream,
+            SockFlag::SOCK_NONBLOCK,
+            None,
+        ).expect("TCP socket creation failed");
 
         let addr = Rc::new(addr.to_owned());
 
@@ -223,7 +259,7 @@ impl Scanner {
         .user_data(op_connect_index as u64);
 
         // Build the LinkTimeout opcode to add timeout feature
-        let timespec = Timespec::new().sec(5); // TODO: Parameterize
+        let timespec = Timespec::new().nsec(50); // TODO: Parameterize
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -238,7 +274,7 @@ impl Scanner {
         let ops = [op_connect, op_timeout, op_close];
 
         unsafe {
-            ring.submission()
+            self.ring.submission()
             .push_multiple(&ops)
             .expect("Failed to push operations, submission queue is full");
 
@@ -357,16 +393,16 @@ fn read_response (
 // Input format is "ip/range" like "192.168.1.0/24"
 fn parse_subnet (
     subnet_str : &str,
-    ports_str : String
 ) -> SubnetInfo {
     let mut ip_itr = subnet_str.splitn(2, "/");
     let ip_start = ip_itr.next().unwrap();
     let subnet_len = ip_itr.next().unwrap().parse::<u8>().unwrap();
-    let ports = ports_str.split(",")
-    .map(|s| s.to_string()
-    .parse::<u16>()
-    .expect("Parse error"))
-    .collect();
+
+    // let ports = ports_str.split(",")
+    // .map(|s| s.to_string()
+    // .parse::<u16>()
+    // .expect("Parse error"))
+    // .collect();
 
     // Subnet specifier must be between 0 and 32
     if subnet_len > 32 {
@@ -375,7 +411,6 @@ fn parse_subnet (
 
     let subnet_info: SubnetInfo = SubnetInfo {
         ip_start: ip_start.to_string(),
-        ports: ports,
         subnet_len: subnet_len,
     };
 
@@ -402,9 +437,63 @@ fn check_supported () {
 }
 
 
+fn parse_ports (filename: &str) -> Result<Vec<u16>, io::Error> {
+    let file = File::open(filename)?;
+    let reader = io::BufReader::new(file);
+    let mut port_list = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let ports: Vec<u16> = line
+            .split(',')
+            .flat_map(|port_str| {
+                if port_str.contains('-') {
+                    // Parse range
+                    let range: Result<Vec<u16>, _> = port_str
+                        .split('-')
+                        .map(|num| u16::from_str(num).map_err(|e| e.to_string()))
+                        .collect();
+
+                    match range {
+                        Ok(range) => {
+                            let start = range.get(0).unwrap();
+                            let end = range.get(1).unwrap();
+                            (*start..=*end).collect()
+                        },
+                        Err(err) => {
+                            eprintln!("Error parsing range: {}", err);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    // Parse single port
+                    match u16::from_str(port_str) {
+                        Ok(port) => vec![port],
+                        Err(err) => {
+                            eprintln!("Error parsing port: {}", err);
+                            Vec::new()
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        port_list.extend(ports);
+    }
+
+    Ok(port_list)
+}
+
+
 fn main() {
     // TODO: Remove
     // use sudo;
+
+    let filename = "src/data/top1000TCP.txt";
+    
+
+    // println!("ports: {:?}", ports);
+    // println!("ports len: {}", ports.len());
 
     // Take arguments
     let args : Vec<String> = env::args().collect();
@@ -417,22 +506,22 @@ fn main() {
 
     // Get parameters
     let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
-    let ports_str = args.get(2).expect("Argument error: Wrong ports format");
+    // let ports_str = args.get(2).expect("Argument error: Wrong ports format");
     
-    let subnet_info = parse_subnet(subnet_str, ports_str.to_string());
+    let subnet_info = parse_subnet(subnet_str);
     
     
     let ip_start = subnet_info.ip_start.clone();
-    let ports = subnet_info.ports.clone();
+    // let ports = subnet_info.ports.clone();
+    let ports = parse_ports(filename)
+    .expect("Error when parsing ports");
     let subnet_len = subnet_info.subnet_len.clone();
 
     let size = 128; // TODO: Take from args
-    let ring = IoUring::new(size * 3).expect("Ring creation failed");
 
-    let mut scanner = Scanner::new();
+    let mut scanner = Scanner::new(size * 3);
 
     scanner.scan(
-        ring,
         &ip_start,
         ports,
         subnet_len,
