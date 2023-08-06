@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, Error};
 use std::os::fd::{AsRawFd, RawFd};
 use std::env;
@@ -18,6 +19,8 @@ use std::str::FromStr;
 
 // TODO: Parse arguments with flags using clap, looks good
 use clap::{arg, command, value_parser, ArgAction, Command, Arg};
+
+const MAX_SOCK_POOL_SIZE: usize = 1020;
 
 #[derive(Clone)]
 struct SubnetInfo {
@@ -57,18 +60,18 @@ impl EntryManager {
 pub struct Scanner {
     entry_manager : EntryManager,
     ring : IoUring,
-    remaining : u32,
-    completed : u32
+    socket_pool: VecDeque<RawFd>,
+    num_step : u8,
     // sockets: Vec<i32>
 }
 
 impl Scanner {
-    pub fn new(entries : u32) -> Self {
+    pub fn new(entries : u32, num_step : u8) -> Self {
         let entry_manager = EntryManager {
             entries: Vec::new(),
         };
 
-        let ring = IoUring::new(entries)
+        let ring = IoUring::new(entries * num_step as u32)
         .expect("Error when creating IoUring instance");
 
         // let mut sockets = Vec::new();
@@ -83,44 +86,46 @@ impl Scanner {
         //     sockets.push(sckt);
         // }
 
+
+        let socket_pool: VecDeque<_> = VecDeque::with_capacity(MAX_SOCK_POOL_SIZE);
+        
         // Return the Scanner instance
         Scanner {
             entry_manager : entry_manager,
             ring : ring,
-            remaining : 0,
-            completed : 0
+            socket_pool,
+            num_step : num_step as _,
             // sockets
         }
     }
     
+    // TODO: Solve the problem of socket creation
+    // TODO: Solve the bug that copies the results of the last element in ring to other elements
+    // TODO: Implement an iterator or an efficient function to get ip:port pairs sequentially
     pub fn scan (
         &mut self,
         ip_range : Vec<Ipv4Addr>,
         ports : Vec<u16>,
-        mut chunk_size: usize,
+        // mut chunk_size: usize,
     ) -> Result<(), io::Error> {
         // let ip_range = get_ip_range();
     
-        let chunks = ip_range.chunks(chunk_size);
+        // let chunks = ip_range.chunks(chunk_size);
 
+        // self.remaining = (ip_range.len() * ports.len()) as u32;
 
-
-        self.remaining = (ip_range.len() * ports.len()) as u32;
-
-        let ring_cap = self.ring.submission().capacity();
-        println!("ring_cap: {}", ring_cap);
+        self.open_sockets();
 
         let mut curr_ip_idx : usize = 0;
         let mut curr_port_idx : usize = 0;
 
+        // TODO: Arrange those redundant checks
         while curr_ip_idx < ip_range.len() {
             
-            // println!("len: {}", self.ring.submission().len());
-
             // Push entries
             let capacity = self.ring.submission().capacity();
 
-            while capacity - 3 >= self.ring.submission().len() && curr_ip_idx < ip_range.len() {
+            while capacity - self.num_step as usize >= self.ring.submission().len() && curr_ip_idx < ip_range.len() {
 
                 // println!("curr ip idx : {}/{}", curr_ip_idx, ip_range.len());
                 // println!("submission len : {}", self.ring.submission().len());
@@ -141,10 +146,11 @@ impl Scanner {
                 let _ = self.connect(&addr);
 
 
-                curr_ip_idx += 1;
                 curr_port_idx += 1;
                 if curr_port_idx >= ports.len() {
+                    curr_ip_idx += 1;
                     curr_port_idx = 0;
+                    
                 }
 
             }
@@ -169,7 +175,7 @@ impl Scanner {
                         if cqe.result() >= 0 {
                             println!("Connection established to: {}", entry_info.ip);
                         } else {
-                            println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                            // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
                         }
                     }
                     // Can handle other op types here
@@ -177,18 +183,21 @@ impl Scanner {
                         // println!("Connection to: {} resulted with code: {}, op: {}", entry_info.ip, cqe.result(), entry_info.op_type);
                     }
         
-                } 
+                }
+
+                // TODO: Make it close connection after it connected
+
+                // println!("Pushed back socket: {}", entry_info.fd);
+                self.socket_pool.push_back(entry_info.fd);
             }
         }
     
-        // TODO: Might change the nesting order here
         // for ip_chunk in chunks {
         //     for port in &ports {
         //         // The last chunk generally has a shorter length, so we make an exception for it
         //         if ip_chunk.len() != chunk_size {
         //             chunk_size = ip_chunk.len();
         //         }
-
         //         self.connect_batch(ip_chunk, port);
         //     }
         // }
@@ -231,13 +240,13 @@ impl Scanner {
             .expect(format!("Error while connecting to adress: {}", addr.to_string()).as_str());
         }    
 
-        self.ring.submit_and_wait(chunk.len() * 3)
+        self.ring.submit_and_wait(chunk.len() * self.num_step as usize)
         .expect("Error submitting to submission queue");
 
         // let completion = ring.completion().collect::<Vec<io_uring::cqueue::Entry>>();
 
         // Get CQE results
-        for _ in 0..chunk.len() * 3 {
+        for _ in 0..chunk.len() * self.num_step as usize {
             let cqe: io_uring::cqueue::Entry = self.ring.completion().next().expect("Completion queue is empty");
 
             // Retrieve the entry index of the completion
@@ -248,7 +257,6 @@ impl Scanner {
 
             // TODO: Might move this checking section to another function
 
-            // println!("{:?}", chunk);
             // If it is defined as a Connect opcode
             match entry_info.op_type {
                 0 => {
@@ -264,7 +272,7 @@ impl Scanner {
                     // println!("Connection to: {} resulted with code: {}, op: {}", entry_info.ip, cqe.result(), entry_info.op_type);
                 }
     
-            } 
+            }
         }
     }
 
@@ -276,13 +284,11 @@ impl Scanner {
         // sckt : i32,
         addr : &SockaddrIn,
         ) -> Result<(), Error> {
+        // println!("Entered connect: {}", addr);
 
-        let sckt = socket(
-            AddressFamily::Inet,
-            SockType::Stream,
-            SockFlag::SOCK_NONBLOCK,
-            None,
-        ).expect("TCP socket creation failed");
+        // TODO: Recheck this code
+        let sckt = self.socket_pool.pop_front().unwrap();
+        // println!("sckt: {}", sckt);
 
         let addr = Rc::new(addr.to_owned());
 
@@ -316,7 +322,7 @@ impl Scanner {
         .user_data(op_connect_index as u64);
 
         // Build the LinkTimeout opcode to add timeout feature
-        let timespec = Timespec::new().nsec(500); // TODO: Parameterize
+        let timespec = Timespec::new().nsec(3000); // TODO: Parameterize
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -328,7 +334,11 @@ impl Scanner {
         .build()
         .user_data(op_close_index as u64);
 
-        let ops = [op_connect, op_timeout, op_close];
+        let ops = [
+            op_connect,
+            op_timeout,
+            op_close
+            ];
 
         unsafe {
             self.ring.submission()
@@ -349,31 +359,18 @@ impl Scanner {
         Ok(())
     }
 
+    fn open_sockets (&mut self) {
+        for _ in 0..MAX_SOCK_POOL_SIZE {
+            let sckt = create_socket();
+            self.socket_pool.push_back(sckt);
+        }
+    }
+
     // A function to make the outputs prettier
     fn parse_result (result : &str) {
         todo!()
     }
 }
-
-// TODO: 1- Open sockets and store them (OK)
-// TODO: 2- In connect_batch, change the for loop to loop over these same sockets for every chunk
-fn open_sockets (chunk_size : usize) -> Result<Vec<i32>, Error> {
-    let mut sockets: Vec<i32> = vec![];
-
-    for i in 0..chunk_size {
-        let sckt = socket(
-            AddressFamily::Inet,
-            SockType::Stream,
-            SockFlag::SOCK_NONBLOCK,
-            None,
-        ).expect("TCP socket creation failed");
-
-        sockets.push(sckt);
-    }
-
-    Ok(sockets)
-}
-
 
 
 // Input format is "ip/range" like "192.168.1.0/24"
@@ -382,7 +379,14 @@ fn parse_subnet (
 ) -> SubnetInfo {
     let mut ip_itr = subnet_str.splitn(2, "/");
     let ip_start = ip_itr.next().unwrap();
-    let subnet_len = ip_itr.next().unwrap().parse::<u8>().unwrap();
+
+    // ip_itr.next().unwrap().parse::<u8>().unwrap();
+    // println!("a: {}", a);
+    let subnet_len = match ip_itr.next() {
+        Some(v) => v.parse::<u8>().unwrap(),
+        None => 1,
+    };
+    // println!("subnet_len: {}", a);
 
     // Subnet specifier must be between 0 and 32
     if subnet_len > 32 {
@@ -396,6 +400,7 @@ fn parse_subnet (
 
     return subnet_info
 }
+
 
 fn get_ip_range (
         ip_start : &str,
@@ -417,6 +422,7 @@ fn get_ip_range (
 
     return ip_range;
 }
+
 
 // Check if the used opcodes are supported for the current kernel
 fn check_supported () {
@@ -483,7 +489,9 @@ fn parse_ports (line : String
 
 }
 
-fn parse_ports_from_file (filename: &str) -> Result<Vec<u16>, io::Error> {
+
+fn parse_ports_from_file (filename: &str) -> Result<Vec<u16>, io::Error> 
+{
     let file = File::open(filename)?;
     let reader = io::BufReader::new(file);
     let mut port_list = Vec::new();
@@ -498,14 +506,24 @@ fn parse_ports_from_file (filename: &str) -> Result<Vec<u16>, io::Error> {
     Ok(port_list)
 }
 
+
+fn create_socket () -> RawFd {
+    socket(
+        AddressFamily::Inet,
+        SockType::Stream,
+        SockFlag::empty(),
+        None,
+    ).expect("TCP socket creation failed")
+}
+
+
 fn main() {
     let tcp_top_1000 = "src/data/top1000TCP.txt";
     
-    // println!("ports: {:?}", ports);
-    // println!("ports len: {}", ports.len());
+    check_supported(); // Check if the kernel supports io_uring operations used in the program
 
     // Take arguments
-    let args : Vec<String> = env::args().collect();
+    // let args : Vec<String> = env::args().collect();
 
     let matches = Command::new("App")
     .version("0.16")
@@ -515,10 +533,18 @@ fn main() {
         .index(1)
         .required(true)
         .value_name("ip_range")
-        .help("ip range to process")
+        .help("usage: io_uring_scanner IP[/SUBNET] [OPTIONS]")
     )
-    .arg(arg!(--file <FILENAME>).required(false))
-    .arg(arg!(--port <PORTS>).required(false))
+        .arg(Arg::new("port")
+            .short('p')
+            .long("port")
+            .action(ArgAction::Append)
+    )
+        .arg(Arg::new("file_name")
+            .short('f')
+            .long("file")
+            .action(ArgAction::Append)
+    )
     .get_matches();
 
 
@@ -536,30 +562,36 @@ fn main() {
 
     };
 
-    check_supported(); // Check if the kernel supports io_uring operations used in the program
-
-    // Get parameters
-    let subnet_str = args.get(1).expect("Argument error: Wrong ip range format");
-    // let ports_str = args.get(2).expect("Argument error: Wrong ports format");
+    let subnet_str = matches.get_one::<String>("ip")
+    .expect("Argument error: Wrong ip range format");
     
     let subnet_info = parse_subnet(subnet_str);
     
     let ip_start = subnet_info.ip_start.clone();
     let subnet_len = subnet_info.subnet_len.clone();
 
-    let ip_range = get_ip_range(&ip_start, subnet_len);
+    println!("subnet_len: {}", subnet_info.subnet_len);
+
+    let ip_range = match subnet_info.subnet_len {
+        1 => vec![Ipv4Addr::from_str(ip_start.as_str()).expect("Wrong IP format")],
+        _ => get_ip_range(&ip_start, subnet_len)
+    };
     
+    // println!("ip_range: {:?}", ip_range);
+    println!("ports: {:?}", ports);
+    
+    // return;
     // .expect("Error when parsing ports");
 
-    let chunk_size = 16; // TODO: Take from args
+    let chunk_size = 1; // TODO: Take from args
 
-    let mut scanner = Scanner::new(chunk_size * 3);
+    let mut scanner = Scanner::new(chunk_size, 3);
 
 
     scanner.scan(
         ip_range,
         ports,
-        chunk_size as usize,
+        // chunk_size as usize,
     ).expect("Error scanning");
 
     // send_tcp_packet(ip_port);
