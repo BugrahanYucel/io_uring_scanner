@@ -167,7 +167,7 @@ impl Scanner {
                         if cqe.result() >= 0 {
                             println!("Connection established to: {}", entry_info.ip);
                         } else {
-                            println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                            // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
                         }
                     }
                     // Can handle other op types here
@@ -189,7 +189,7 @@ impl Scanner {
                 // unistd::close(entry_info.fd);
                 self.entry_manager.free_entry(index);
 
-                completed += 1;
+                // completed += 1;
             }
         }
         
@@ -243,7 +243,8 @@ impl Scanner {
         .user_data(op_connect_index as u64);
 
         // Build the LinkTimeout opcode to add timeout feature
-        let timespec = Timespec::new().sec(1); // TODO: Parameterize
+        // let timespec = Timespec::new().nsec(10000000); // TODO: Parameterize
+        let timespec = Timespec::new().sec(1000); // TODO: Parameterize
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -541,7 +542,7 @@ fn main() {
     // println!("ip_range: {:?}", ip_range);
     // println!("ports: {:?}", ports);
     
-    let chunk_size = 1; // TODO: Take from args
+    let chunk_size = 512; // TODO: Take from args
 
     let mut scanner = Scanner::new(chunk_size, 3);
 
@@ -554,8 +555,6 @@ fn main() {
 }
 
 // FIXME: ip x.y.z.0 is not taken for subnet 24
-
-// FIXME: Scan does not connect
 
 // TODO: Figure out why multiple batches don't work
 
