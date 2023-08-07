@@ -76,18 +76,6 @@ impl Scanner {
         let ring = IoUring::new(entries * num_step as u32)
         .expect("Error when creating IoUring instance");
 
-        // let mut sockets = Vec::new();
-        // for _ in 0..entries {
-        //     let sckt = socket(
-        //         AddressFamily::Inet,
-        //         SockType::Stream,
-        //         SockFlag::SOCK_NONBLOCK,
-        //         None,
-        //     ).expect("TCP socket creation failed");
-
-        //     sockets.push(sckt);
-        // }
-
         // let socket_pool: VecDeque<_> = VecDeque::with_capacity(MAX_SOCK_POOL_SIZE);
         
         // Return the Scanner instance
@@ -113,8 +101,6 @@ impl Scanner {
         let remaining = (ip_range.len() * ports.len()) as u32;
         let mut completed = 0;
 
-        // self.open_sockets();
-
         let mut curr_ip_idx : usize = 0;
         let mut curr_port_idx : usize = 0;
 
@@ -127,7 +113,7 @@ impl Scanner {
             let capacity = self.ring.submission().capacity();
 
             while capacity - self.num_step as usize >= self.ring.submission().len() 
-            && curr_ip_idx < ip_range.len() 
+            && curr_ip_idx < ip_range.len()
             {
 
                 let curr_ip = ip_range.get(curr_ip_idx).unwrap();
@@ -158,9 +144,10 @@ impl Scanner {
                 }
             }
 
-            // println!("pushed: {}", pushed);
+            // submit_and wait() is the best approach
             let _ = self.ring.submit_and_wait(pushed * self.num_step as usize)?;
             // let _ = self.ring.submit();
+
 
             // Consume results
             while !self.ring.completion().is_empty() {
@@ -182,7 +169,7 @@ impl Scanner {
                         if cqe.result() >= 0 {
                             println!("Connection established to: {}", entry_info.ip);
                         } else {
-                            println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                            // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
                         }
                     }
                     // Can handle other op types here
@@ -197,23 +184,12 @@ impl Scanner {
                 // println!("Pushed back socket: {}", entry_info.fd);
                 // self.socket_pool.push_back(entry_info.fd);
 
-                println!("Freeing : {}", index);
-                self.close_socket(entry_info.fd);
+                // println!("Freeing : {}", entry_info.fd);
                 self.entry_manager.free_entry(index);
                 completed += 1;
             }
         }
-    
-        // for ip_chunk in chunks {
-        //     for port in &ports {
-        //         // The last chunk generally has a shorter length, so we make an exception for it
-        //         if ip_chunk.len() != chunk_size {
-        //             chunk_size = ip_chunk.len();
-        //         }
-        //         self.connect_batch(ip_chunk, port);
-        //     }
-        // }
-    
+        
         Ok(())
     }
 
@@ -359,12 +335,13 @@ impl Scanner {
         ).expect("TCP socket creation failed")
     }
 
-    fn close_socket (&mut self, fd : i32) {
-        let _ = nix::sys::socket::shutdown(
-            fd,
-            nix::sys::socket::Shutdown::Both,
-        );
-    }
+    // fn close_socket (&mut self, fd : i32) {
+    //     let a = nix::sys::socket::shutdown(
+    //         fd,
+    //         nix::sys::socket::Shutdown::Both,
+    //     ).expect("");
+    //     a
+    // }
 }
 
 
@@ -541,7 +518,6 @@ fn main() {
             .to_string())
             .expect("Error when parsing ports from arguments")
         }
-
     };
 
     let subnet_str = matches.get_one::<String>("ip")
