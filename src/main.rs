@@ -9,6 +9,7 @@ use libc::{self, iovec};
 
 use io_uring::{squeue, opcode, types::Fd, IoUring, types::Timespec};
 use io_uring::Probe;
+use nix::unistd;
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 use ipnet::Ipv4Net;
@@ -98,9 +99,6 @@ impl Scanner {
     
         // let chunks = ip_range.chunks(chunk_size);
 
-        let remaining = (ip_range.len() * ports.len()) as u32;
-        let mut completed = 0;
-
         let mut curr_ip_idx : usize = 0;
         let mut curr_port_idx : usize = 0;
 
@@ -120,7 +118,7 @@ impl Scanner {
                 let curr_port = ports.get(curr_port_idx).unwrap();
 
                 let sckt = self.create_socket().as_raw_fd();
-                println!("New socket : {}", sckt);
+                // println!("New socket : {}", sckt);
 
 
                 let ip_bytes = curr_ip.clone().octets();
@@ -151,7 +149,7 @@ impl Scanner {
 
             // Consume results
             while !self.ring.completion().is_empty() {
-                println!("{}/{}", completed, remaining * self.num_step as u32 - 1);
+                // println!("{}/{}", completed, remaining * self.num_step as u32 - 1);
 
 
                 let cqe: io_uring::cqueue::Entry = self.ring.completion().next().expect("Completion queue is empty");
@@ -169,7 +167,7 @@ impl Scanner {
                         if cqe.result() >= 0 {
                             println!("Connection established to: {}", entry_info.ip);
                         } else {
-                            // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                            println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
                         }
                     }
                     // Can handle other op types here
@@ -184,8 +182,13 @@ impl Scanner {
                 // println!("Pushed back socket: {}", entry_info.fd);
                 // self.socket_pool.push_back(entry_info.fd);
 
-                // println!("Freeing : {}", entry_info.fd);
+                if cqe.result() == -libc::ECANCELED {
+                    // println!("Freeing : {}", entry_info.fd);
+                    let _ = unistd::close(entry_info.fd);
+                }
+                // unistd::close(entry_info.fd);
                 self.entry_manager.free_entry(index);
+
                 completed += 1;
             }
         }
