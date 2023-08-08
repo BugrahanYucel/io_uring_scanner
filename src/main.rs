@@ -1,7 +1,5 @@
-use std::collections::VecDeque;
 use std::io::{self, Error};
 use std::os::fd::{AsRawFd, RawFd};
-use std::env;
 use std::rc::Rc;
 
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType, SockaddrLike, SockaddrIn};
@@ -20,8 +18,6 @@ use std::str::FromStr;
 
 // TODO: Parse arguments with flags using clap, looks good
 use clap::{arg, command, value_parser, ArgAction, Command, Arg};
-
-const MAX_SOCK_POOL_SIZE: usize = 1020;
 
 #[derive(Clone)]
 struct SubnetInfo {
@@ -65,7 +61,6 @@ pub struct Scanner {
     entry_manager : EntryManager,
     ring : IoUring,
     num_step : u8,
-    // sockets: Vec<i32>
 }
 
 impl Scanner {
@@ -77,8 +72,6 @@ impl Scanner {
         let ring = IoUring::new(entries * num_step as u32)
         .expect("Error when creating IoUring instance");
 
-        // let socket_pool: VecDeque<_> = VecDeque::with_capacity(MAX_SOCK_POOL_SIZE);
-        
         // Return the Scanner instance
         Scanner {
             entry_manager : entry_manager,
@@ -93,11 +86,7 @@ impl Scanner {
         &mut self,
         ip_range : Vec<Ipv4Addr>,
         ports : Vec<u16>,
-        // mut chunk_size: usize,
     ) -> Result<(), io::Error> {
-        // let ip_range = get_ip_range();
-    
-        // let chunks = ip_range.chunks(chunk_size);
 
         let mut curr_ip_idx : usize = 0;
         let mut curr_port_idx : usize = 0;
@@ -118,8 +107,6 @@ impl Scanner {
                 let curr_port = ports.get(curr_port_idx).unwrap();
 
                 let sckt = self.create_socket().as_raw_fd();
-                // println!("New socket : {}", sckt);
-
 
                 let ip_bytes = curr_ip.clone().octets();
                 let port = curr_port.clone();
@@ -132,7 +119,8 @@ impl Scanner {
                     port,
                 );
 
-                let _ = self.connect(&addr, sckt);
+                let _ = self.push_connect(&addr, sckt);
+                // println!("Pushed {}", addr);
                 pushed += 1;
 
                 curr_port_idx += 1;
@@ -141,24 +129,27 @@ impl Scanner {
                     curr_port_idx = 0;
                 }
             }
+            // println!("--------------------------------");
 
             // submit_and wait() is the best approach
+
             let _ = self.ring.submit_and_wait(pushed * self.num_step as usize)?;
             // let _ = self.ring.submit();
 
 
             // Consume results
             while !self.ring.completion().is_empty() {
-                // println!("Entered");
-                // println!("{}/{}", completed, remaining * self.num_step as u32 - 1);
-
                 let cqe: io_uring::cqueue::Entry = self.ring.completion().next().expect("Completion queue is empty");
+                // println!("cqe: {:?}", cqe);
+
 
                 // Retrieve the entry index of the completion
                 let index = cqe.user_data();
 
                 let entry_info = self.entry_manager.get_entry(index as _)
                 .expect("Error when retrieving entry from vector");
+
+                // println!("Consuming entry: {}", entry_info.ip);
 
                 // TODO: The sockets we push back are used again, solve this
                 match entry_info.op_type {
@@ -185,8 +176,7 @@ impl Scanner {
 
                 self.entry_manager.free_entry(index);
             }
-
-            }
+        }
         
         Ok(())
     }
@@ -195,29 +185,33 @@ impl Scanner {
     /*
     * TCP connect to a single port
     */
-    fn connect (
+    fn push_connect (
         &mut self,
         addr : &SockaddrIn,
         sckt : i32,
         ) -> Result<(), Error> {
-        // println!("Entered connect: {}", addr);
 
         let addr = Rc::new(addr.to_owned());
 
         let op_connect_index = self.entry_manager.add_entry(
-            Rc::new(*addr),
+            // Rc::new(*addr),
+            Rc::clone(&addr),
             0,
             sckt,
         );
 
         let op_timeout_index = self.entry_manager.add_entry(
-            Rc::new(*addr),
+            // Rc::new(*addr),
+            Rc::clone(&addr),
+
             1,
             sckt,
         );
 
         let op_close_index = self.entry_manager.add_entry(
-            Rc::new(*addr),
+            // Rc::new(*addr),
+            Rc::clone(&addr),
+
             2,
             sckt,
         );
@@ -234,8 +228,8 @@ impl Scanner {
         .user_data(op_connect_index as u64);
 
         // Build the LinkTimeout opcode to add timeout feature
-        let timespec = Timespec::new().nsec(10000000); // TODO: Parameterize
-        // let timespec = Timespec::new().sec(1); // TODO: Parameterize
+        // TODO: Parameterize this
+        let timespec = Timespec::new().nsec(10000000); // 0.01 seconds * X
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -307,7 +301,7 @@ impl Scanner {
         socket(
             AddressFamily::Inet,
             SockType::Stream,
-            SockFlag::empty(),
+            SockFlag::SOCK_NONBLOCK,
             None,
         ).expect("TCP socket creation failed")
     }
@@ -505,7 +499,7 @@ fn main() {
     };
     
 
-    let chunk_size = 1; // TODO: Take from args
+    let chunk_size = 16; // TODO: Take from args
 
     let mut scanner = Scanner::new(chunk_size, 3);
 
