@@ -149,8 +149,8 @@ impl Scanner {
 
             // Consume results
             while !self.ring.completion().is_empty() {
+                // println!("Entered");
                 // println!("{}/{}", completed, remaining * self.num_step as u32 - 1);
-
 
                 let cqe: io_uring::cqueue::Entry = self.ring.completion().next().expect("Completion queue is empty");
 
@@ -177,21 +177,16 @@ impl Scanner {
         
                 }
 
-                // TODO: Make it drop the socket
-
-                // println!("Pushed back socket: {}", entry_info.fd);
-                // self.socket_pool.push_back(entry_info.fd);
-
+                // Close dangling sockets in case of operation cancel
                 if cqe.result() == -libc::ECANCELED {
-                    // println!("Freeing : {}", entry_info.fd);
+                    // println!("Freeing : {} for {}", entry_info.fd, entry_info.ip);
                     let _ = unistd::close(entry_info.fd);
                 }
-                // unistd::close(entry_info.fd);
-                self.entry_manager.free_entry(index);
 
-                // completed += 1;
+                self.entry_manager.free_entry(index);
             }
-        }
+
+            }
         
         Ok(())
     }
@@ -206,10 +201,6 @@ impl Scanner {
         sckt : i32,
         ) -> Result<(), Error> {
         // println!("Entered connect: {}", addr);
-
-        // TODO: Handle the race condition here
-        // let sckt = self.socket_pool.pop_front().expect("Socket pool is empty");
-        // println!("sckt: {}", sckt);
 
         let addr = Rc::new(addr.to_owned());
 
@@ -243,8 +234,8 @@ impl Scanner {
         .user_data(op_connect_index as u64);
 
         // Build the LinkTimeout opcode to add timeout feature
-        // let timespec = Timespec::new().nsec(10000000); // TODO: Parameterize
-        let timespec = Timespec::new().sec(1000); // TODO: Parameterize
+        let timespec = Timespec::new().nsec(10000000); // TODO: Parameterize
+        // let timespec = Timespec::new().sec(1); // TODO: Parameterize
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -268,16 +259,6 @@ impl Scanner {
             self.ring.submission()
             .push_multiple(&ops)
             .expect("Failed to push operations, submission queue is full");
-
-            // ring.submission()
-            // .push(&op_connect)
-            // .expect("Failed to push Connect to submission queue, queue is full");
-            // ring.submission()
-            // .push(&op_timeout)
-            // .expect("Failed to push LinkTimeout to submission queue, queue is full");
-            // ring.submission()
-            // .push(&op_close)
-            // .expect("Failed to push Close to submission queue, queue is full");
         }
 
         Ok(())
@@ -317,14 +298,6 @@ impl Scanner {
     //     };
     // }
 
-    // fn open_sockets (&mut self) {
-    //     for _ in 0..MAX_SOCK_POOL_SIZE {
-    //         let sckt = self.create_socket();
-    //         self.socket_pool.push_back(sckt);
-    //     }
-    //     println!("{} sockets created", MAX_SOCK_POOL_SIZE);
-    // }
-
     // A function to make the outputs prettier
     fn parse_result (result : &str) {
         todo!()
@@ -338,14 +311,6 @@ impl Scanner {
             None,
         ).expect("TCP socket creation failed")
     }
-
-    // fn close_socket (&mut self, fd : i32) {
-    //     let a = nix::sys::socket::shutdown(
-    //         fd,
-    //         nix::sys::socket::Shutdown::Both,
-    //     ).expect("");
-    //     a
-    // }
 }
 
 
@@ -539,10 +504,8 @@ fn main() {
         _ => get_ip_range(&ip_start, subnet_len)
     };
     
-    // println!("ip_range: {:?}", ip_range);
-    // println!("ports: {:?}", ports);
-    
-    let chunk_size = 512; // TODO: Take from args
+
+    let chunk_size = 1; // TODO: Take from args
 
     let mut scanner = Scanner::new(chunk_size, 3);
 
