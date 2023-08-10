@@ -1,1 +1,9 @@
 /target
+src/main.rs
+scan_results.csv
+.gitignore
+benchmark.rs
+io_uring_scanner
+src/res.csv
+benchmark
+.rustc_info.json

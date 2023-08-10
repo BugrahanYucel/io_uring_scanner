@@ -15,6 +15,7 @@ use ipnet::Ipv4Net;
 use std::fs::File;
 use std::io::BufRead;
 use std::str::FromStr;
+use std::time::{self, Instant};
 
 // TODO: Parse arguments with flags using clap, looks good
 use clap::{arg, command, value_parser, ArgAction, Command, Arg};
@@ -120,7 +121,7 @@ impl Scanner {
                 );
 
                 let _ = self.push_connect(&addr, sckt);
-                // println!("Pushed {}", addr);
+                
                 pushed += 1;
 
                 curr_port_idx += 1;
@@ -129,13 +130,10 @@ impl Scanner {
                     curr_port_idx = 0;
                 }
             }
-            // println!("--------------------------------");
 
             // submit_and wait() is the best approach
-
             let _ = self.ring.submit_and_wait(pushed * self.num_step as usize)?;
             // let _ = self.ring.submit();
-
 
             // Consume results
             while !self.ring.completion().is_empty() {
@@ -149,8 +147,6 @@ impl Scanner {
                 let entry_info = self.entry_manager.get_entry(index as _)
                 .expect("Error when retrieving entry from vector");
 
-                // println!("Consuming entry: {}", entry_info.ip);
-
                 // TODO: The sockets we push back are used again, solve this
                 match entry_info.op_type {
                     0 => {
@@ -159,6 +155,9 @@ impl Scanner {
                             println!("Connection established to: {}", entry_info.ip);
                         } else {
                             // println!("Connection failed: {} , Error code: {}", entry_info.ip, cqe.result());
+                            // if cqe.result() == -125 {
+                            //     println!("Connection canceled");
+                            // }
                         }
                     }
                     // Can handle other op types here
@@ -194,24 +193,19 @@ impl Scanner {
         let addr = Rc::new(addr.to_owned());
 
         let op_connect_index = self.entry_manager.add_entry(
-            // Rc::new(*addr),
             Rc::clone(&addr),
             0,
             sckt,
         );
 
         let op_timeout_index = self.entry_manager.add_entry(
-            // Rc::new(*addr),
             Rc::clone(&addr),
-
             1,
             sckt,
         );
 
         let op_close_index = self.entry_manager.add_entry(
-            // Rc::new(*addr),
             Rc::clone(&addr),
-
             2,
             sckt,
         );
@@ -227,9 +221,10 @@ impl Scanner {
         .flags(squeue::Flags::IO_LINK)
         .user_data(op_connect_index as u64);
 
-        // Build the LinkTimeout opcode to add timeout feature
-        // TODO: Parameterize this
-        let timespec = Timespec::new().nsec(10000000); // 0.01 seconds * X
+        // TODO: Parameterize timeout duration
+        // let timespec = Timespec::new().nsec(1000000 * 500); // 0.001 seconds * X
+        let timespec = Timespec::new().sec(1);
+
         let op_timeout: squeue::Entry = opcode::LinkTimeout::new(
             &timespec
         )
@@ -258,40 +253,6 @@ impl Scanner {
         Ok(())
     }
 
-    // fn read_response ( //TODO:
-    //     &mut self,
-    //     addr : &SockaddrIn,
-    //     buffer: &mut [u8],
-    // ) {
-    //     const BUFFER_SIZE: usize = 1024;
-    //     let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
-    
-    //     // let mut rx_buffer: Vec<u8> = vec![0; 1024];
-    
-    //     // let rcv_buffer = iovec {
-    //     //     iov_base: rx_buffer.as_mut_ptr() as *mut libc::c_void, 
-    //     //     iov_len: rx_buffer.len(),
-    //     // };
-
-    //     let sckt = self.socket_pool.pop_front().expect("Socket pool is empty");
-    
-    //     let op_read_index = self.entry_manager.add_entry(
-    //         Rc::new(*addr),
-    //         2,
-    //         sckt.as_raw_fd(),
-    //     );
-    //     let read_e = opcode::Read::new(
-    //         Fd(sckt.as_raw_fd()),
-    //         buffer.as_mut_ptr(),
-    //         buffer.len() as u32
-    //     ).build()
-    //     .user_data(user_data);
-    
-    //     unsafe {
-    //         self.ring.submission().push(&read_e).expect("Submission queue is full");
-    //     };
-    // }
-
     // A function to make the outputs prettier
     fn parse_result (result : &str) {
         todo!()
@@ -304,6 +265,40 @@ impl Scanner {
             SockFlag::SOCK_NONBLOCK,
             None,
         ).expect("TCP socket creation failed")
+    }
+
+    fn read_response (
+        &mut self,
+        addr : &SockaddrIn,
+        buffer: &mut [u8],
+    ) {
+        const BUFFER_SIZE: usize = 1024;
+        let mut buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+    
+        // let mut rx_buffer: Vec<u8> = vec![0; 1024];
+    
+        // let rcv_buffer = iovec {
+        //     iov_base: rx_buffer.as_mut_ptr() as *mut libc::c_void, 
+        //     iov_len: rx_buffer.len(),
+        // };
+
+        let sckt = self.create_socket();
+    
+        let op_read_index = self.entry_manager.add_entry(
+            Rc::new(*addr),
+            2,
+            sckt.as_raw_fd(),
+        );
+        let read_e = opcode::Read::new(
+            Fd(sckt.as_raw_fd()),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32
+        ).build()
+        .user_data(0);
+    
+        unsafe {
+            self.ring.submission().push(&read_e).expect("Submission queue is full");
+        };
     }
 }
 
@@ -498,23 +493,22 @@ fn main() {
         _ => get_ip_range(&ip_start, subnet_len)
     };
     
+    let chunk_size: u32 = 2048; // TODO : Take from args
 
-    let chunk_size = 16; // TODO: Take from args
+    let mut scanner = Scanner::new(chunk_size / 3, 3);
 
-    let mut scanner = Scanner::new(chunk_size, 3);
-
+    let start = Instant::now();
     scanner.scan(
         ip_range,
         ports,
         // chunk_size as usize,
     ).expect("Error scanning");
+    let duration = Instant::now() - start;
+
+    println!("TCP connect scan finished in {:5} seconds.", duration.as_millis() as f64 / 1000.0);
+
 
 }
-
-// FIXME: ip x.y.z.0 is not taken for subnet 24
-
-// TODO: Figure out why multiple batches don't work
-
 
 fn send_tcp_packet (
     sckt : i32
