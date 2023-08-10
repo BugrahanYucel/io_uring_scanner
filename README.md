@@ -8,6 +8,8 @@ Build:
 
 in directory, build with
 ```cargo build --release```
+
 the binary ```io_uring_scanner``` will be generated inside ```./target/release```
+
 then run the binary
 ```./io_uring_scanner IP[/SUBNET_LENGTH] [OPTIONS]```
