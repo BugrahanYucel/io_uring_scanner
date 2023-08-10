@@ -9,16 +9,15 @@ use io_uring::{squeue, opcode, types::Fd, IoUring, types::Timespec};
 use io_uring::Probe;
 use nix::unistd;
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 
 use std::fs::File;
 use std::io::BufRead;
 use std::str::FromStr;
-use std::time::{self, Instant};
+use std::time::Instant;
 
-// TODO: Parse arguments with flags using clap, looks good
-use clap::{arg, command, value_parser, ArgAction, Command, Arg};
+use clap::{ArgAction, Command, Arg};
 
 #[derive(Clone)]
 struct SubnetInfo {
@@ -81,8 +80,6 @@ impl Scanner {
         }
     }
     
-    // TODO: Solve the bug that copies the results of the last element in ring to other elements
-    // TODO: Implement an iterator or an efficient function to get ip:port pairs sequentially
     pub fn scan (
         &mut self,
         ip_range : Vec<Ipv4Addr>,
@@ -138,8 +135,6 @@ impl Scanner {
             // Consume results
             while !self.ring.completion().is_empty() {
                 let cqe: io_uring::cqueue::Entry = self.ring.completion().next().expect("Completion queue is empty");
-                // println!("cqe: {:?}", cqe);
-
 
                 // Retrieve the entry index of the completion
                 let index = cqe.user_data();
@@ -147,7 +142,6 @@ impl Scanner {
                 let entry_info = self.entry_manager.get_entry(index as _)
                 .expect("Error when retrieving entry from vector");
 
-                // TODO: The sockets we push back are used again, solve this
                 match entry_info.op_type {
                     0 => {
                         // Connect opcode completion
