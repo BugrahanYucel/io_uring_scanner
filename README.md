@@ -6,10 +6,10 @@ Quick note for usage (Need Cargo to build for now)
 
 Build:
 
-in directory, build with
+In directory, build with
 ```cargo build --release```
 
-the binary ```io_uring_scanner``` will be generated inside ```./target/release```
+The binary ```io_uring_scanner``` will be generated inside ```./target/release```
 
-then run the binary
+Then run the binary
 ```./io_uring_scanner IP[/SUBNET_LENGTH] [OPTIONS]```
